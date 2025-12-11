@@ -1,0 +1,159 @@
+library(tidyverse)
+library(janitor)
+library(lme4)
+library(MASS)
+library(mgcv)
+library(car)
+library(broom.mixed)
+library(stringi)
+library(forcats)
+
+PSSS_MODEL_DATA_copy <- read.csv("PSSS_MODEL DATA copy.csv", stringsAsFactors = FALSE)
+data <- PSSS_MODEL_DATA_copy %>%
+  clean_names() %>%                 
+  mutate(
+    country_id = as.factor(country),
+    yearweek_index = year*100 + week
+  ) %>%
+  arrange(country_id, year, week)
+
+data <- data %>%
+  mutate(
+    temp_range = avgmaxtemp - avgmintemp
+  )
+data <- data %>%
+  filter(country != "Pitcairn Islands") %>%
+  mutate(country_id = forcats::fct_drop(country_id))
+data <- data %>%
+  mutate(
+    diarrhoea = as.numeric(diarrhoea),
+    afr = as.numeric(afr),
+    dli = as.numeric(dli)
+  )
+
+covars <- c("ndvi8", "avgpreci", "avgmeantemp", "avgmaxtemp", 
+            "avgmintemp", "temp_range", "minpreci", "maxpreci", 
+            "totalpreci", "gdp", "urbanppl")
+offset_var <- "population"
+outcomes <- c("diarrhoea","afr","dli")
+group_var <- "country_id"
+
+####standardising covar
+standard_params <- data %>%
+  summarise(across(all_of(covars), 
+                   list(mean = ~mean(., na.rm = TRUE),
+                        sd = ~sd(., na.rm = TRUE)),
+                   .names = "{.col}_{.fn}"))
+data <- data %>%
+  mutate(across(all_of(covars), 
+                ~scale(.)[,1], 
+                .names = "{.col}_std"))
+covars_std <- paste0(covars, "_std")
+data <- data %>%
+  mutate(log_population = log(population))
+
+####lagged var
+create_lags_by_country <- function(data, vars, max_lag = 4, group_var = "country_id") {
+  
+  data_with_lags <- data
+  
+  for (var in vars) {
+    for (lag in 1:max_lag) {
+      lag_name <- paste0(var, "_lag", lag)
+      
+      data_with_lags <- data_with_lags %>%
+        group_by(!!sym(group_var)) %>%
+        mutate(!!lag_name := lag(!!sym(var), n = lag, default = NA)) %>%
+        ungroup()
+    }
+  }
+  
+  return(data_with_lags)
+}
+data <- create_lags_by_country(data, covars_std, max_lag = 4, group_var = group_var)
+lagged_vars <- expand.grid(
+  covar = covars_std,
+  lag = 1:4,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(var_name = paste0(covar, "_lag", lag)) %>%
+  pull(var_name)
+
+####overdispersion test
+test_overdispersion <- function(outcome, data, offset_var = "log_population") {
+  data_clean <- data %>% filter(!is.na(!!sym(outcome)))
+  formula_pois <- as.formula(paste0(outcome, " ~ 1 + offset(", offset_var, ")"))
+  model_pois <- glm(formula_pois, data = data_clean, family = poisson())
+  residual_deviance <- sum(residuals(model_pois, type = "deviance")^2)
+  df_residual <- df.residual(model_pois)
+  overdispersion <- residual_deviance / df_residual
+  pval <- pchisq(residual_deviance, df_residual, lower.tail = FALSE)
+  return(tibble(
+    outcome = outcome,
+    overdispersion_param = overdispersion,
+    p_value = pval,
+    use_NB = overdispersion > 1 & pval < 0.001
+  ))
+}
+overdispersion_results <- bind_rows(
+  test_overdispersion("afr", data),
+  test_overdispersion("dli", data %>% filter(!is.na(dli))),
+  test_overdispersion("diarrhoea", data)
+)
+
+print(overdispersion_results)
+
+####optimal lagged var
+select_optimal_lag <- function(outcome, covar_base, data, 
+                               max_lag = 4, 
+                               group_var = "country_id",
+                               offset_var = "log_population") {
+  
+  data_clean <- data %>% filter(!is.na(!!sym(outcome)))
+  
+  results <- tibble()
+  
+  for (lag in 1:max_lag) {
+    predictor <- paste0(covar_base, "_lag", lag)
+    
+    if (predictor %in% names(data_clean)) {
+      data_model <- data_clean %>% filter(!is.na(!!sym(predictor)))
+      
+      if (nrow(data_model) > 100) {
+        
+        formula_str <- paste0(outcome, " ~ ", predictor, 
+                              " + (1 | ", group_var, ") + offset(", offset_var, ")")
+        
+        tryCatch({
+          model <- glmer.nb(as.formula(formula_str), data = data_model,
+                            control = glmerControl(optimizer = "bobyqa",
+                                                   optCtrl = list(maxfun = 100000)))
+          
+          results <- bind_rows(results, tibble(
+            outcome = outcome,
+            predictor = covar_base,
+            lag = lag,
+            AIC = AIC(model),
+            n_obs = nrow(data_model)
+          ))
+        }, error = function(e) {
+          message("Error fitting ", outcome, " ~ ", predictor)
+        })
+      }
+    }
+  }
+  
+  if (nrow(results) > 0) {
+    results <- results %>% mutate(optimal = AIC == min(AIC))
+  }
+  
+  return(results)
+}
+
+climate_vars <- c("avgmaxtemp_std", "avgmintemp_std", "avgmeantemp_std",
+                  "temp_range_std", "avgpreci_std", "totalpreci_std", 
+                  "maxpreci_std", "minpreci_std", "ndvi8_std")
+afr_lags <- map_df(climate_vars, ~select_optimal_lag("afr", .x, data))
+data_dli <- data %>% filter(year >= 2017)
+dli_lags <- map_df(climate_vars, ~select_optimal_lag("dli", .x, data_dli))
+diarrhoea_lags <- map_df(climate_vars, ~select_optimal_lag("diarrhoea", .x, data))
