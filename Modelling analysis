@@ -275,3 +275,131 @@ print(
     dplyr::select(term, estimate, conf.low, conf.high, p.value) %>%
     dplyr::mutate(dplyr::across(where(is.numeric), ~round(., 3)))
 )
+
+#dli
+dli_base <- glmer.nb(
+  dli ~ 
+    avgmeantemp_std_lag3 + 
+    avgmaxtemp_std_lag3 + 
+    avgmintemp_std_lag3 + 
+    temp_range_std_lag2 +
+    avgpreci_std_lag1 + 
+    totalpreci_std_lag2 +
+    maxpreci_std_lag3 + 
+    minpreci_std_lag4 +
+    ndvi8_std_lag4 +      
+    gdp_std + 
+    urbanppl_std +
+    (1 | country_id) + 
+    offset(log_population),
+  data = data_dli,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+)
+
+dli_vif <- car::vif(dli_base)
+high_vif_dli <- dli_vif[dli_vif > 5]
+
+if (length(high_vif_dli) > 0) {
+  cat("\n⚠ Variables with VIF > 5:\n")
+  print(round(high_vif_dli, 2))
+  cat("\nProceeding with variable selection...\n")
+} else {
+  cat("\n✓ No multicollinearity issues (all VIF < 5)\n")
+}
+
+temp_vars_dli <- c("avgmeantemp_std_lag3", "avgmaxtemp_std_lag3", 
+                   "avgmintemp_std_lag3", "temp_range_std_lag2")
+
+temp_results_dli <- tibble()
+
+for (temp_var in temp_vars_dli) {
+  formula_temp <- as.formula(paste0(
+    "dli ~ ", temp_var, " + avgpreci_std_lag1 + ndvi8_std_lag4 + ",
+    "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
+  ))
+  
+  model_temp <- glmer.nb(
+    formula_temp,
+    data = data_dli,
+    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+  )
+  
+  temp_coef <- summary(model_temp)$coefficients[temp_var, ]
+  
+  temp_results_dli <- bind_rows(temp_results_dli, tibble(
+    Variable = temp_var,
+    Coefficient = temp_coef["Estimate"],
+    SE = temp_coef["Std. Error"],
+    Z_value = temp_coef["z value"],
+    P_value = temp_coef["Pr(>|z|)"],
+    AIC = AIC(model_temp),
+    VIF_mean = mean(car::vif(model_temp))
+  ))
+}
+
+print(temp_results_dli %>% 
+        arrange(AIC) %>%
+        mutate(across(where(is.numeric), ~round(., 3))))
+best_temp_dli <- temp_results_dli %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
+
+preci_vars_dli <- c("avgpreci_std_lag1", "totalpreci_std_lag2", 
+                    "maxpreci_std_lag3", "minpreci_std_lag4")
+
+preci_results_dli <- tibble()
+
+for (preci_var in preci_vars_dli) {
+  
+  cat("  Testing", preci_var, "...\n")
+  
+  formula_preci <- as.formula(paste0(
+    "dli ~ ", best_temp_dli, " + ", preci_var, " + ndvi8_std_lag4 + ",
+    "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
+  ))
+  
+  model_preci <- glmer.nb(
+    formula_preci,
+    data = data_dli,
+    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+  )
+  
+  preci_coef <- summary(model_preci)$coefficients[preci_var, ]
+  
+  preci_results_dli <- bind_rows(preci_results_dli, tibble(
+    Variable = preci_var,
+    Coefficient = preci_coef["Estimate"],
+    SE = preci_coef["Std. Error"],
+    Z_value = preci_coef["z value"],
+    P_value = preci_coef["Pr(>|z|)"],
+    AIC = AIC(model_preci),
+    VIF_mean = mean(car::vif(model_preci))
+  ))
+}
+
+print(preci_results_dli %>% 
+        arrange(AIC) %>%
+        mutate(across(where(is.numeric), ~round(., 3))))
+
+best_preci_dli <- preci_results_dli %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
+
+dli_final <- glmer.nb(
+  as.formula(paste0(
+    "dli ~ ", best_temp_dli, " + ", best_preci_dli, " + ndvi8_std_lag4 + ",
+    "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
+  )),
+  data = data_dli,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+)
+
+dli_final_vif <- car::vif(dli_final)
+print(round(dli_final_vif, 2))
+if (all(dli_final_vif < 5)) {
+  cat("✓ All VIF < 5. No multicollinearity issues.\n")
+} else {
+  cat("⚠ Warning: Some VIF values > 5!\n")
+}
+print(
+  tidy(dli_final, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
+    dplyr::filter(term != "(Intercept)") %>%
+    dplyr::select(term, estimate, conf.low, conf.high, p.value) %>%
+    dplyr::mutate(dplyr::across(where(is.numeric), ~round(., 3)))
+)
