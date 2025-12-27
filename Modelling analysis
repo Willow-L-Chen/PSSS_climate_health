@@ -403,3 +403,116 @@ print(
     dplyr::select(term, estimate, conf.low, conf.high, p.value) %>%
     dplyr::mutate(dplyr::across(where(is.numeric), ~round(., 3)))
 )
+
+#diarrhoea
+diarrhoea_base <- glmer.nb(
+  diarrhoea ~ 
+    avgmeantemp_std_lag4 + 
+    avgmaxtemp_std_lag4 + 
+    avgmintemp_std_lag4 + 
+    temp_range_std_lag4 +
+    avgpreci_std_lag4 + 
+    totalpreci_std_lag4 +
+    maxpreci_std_lag4 + 
+    minpreci_std_lag4 +
+    ndvi8_std_lag4 +
+    gdp_std + 
+    urbanppl_std +
+    (1 | country_id) + 
+    offset(log_population),
+  data = data %>% filter(!is.na(diarrhoea)),
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+)
+
+diarrhoea_vif <- car::vif(diarrhoea_base)
+high_vif_diarrhoea <- diarrhoea_vif[diarrhoea_vif > 5]
+
+if (length(high_vif_diarrhoea) > 0) {
+  cat("\n Variables with VIF > 5:\n")
+  print(round(high_vif_diarrhoea, 2))
+  cat("\nProceeding with variable selection...\n")
+} else {
+  cat("\n No multicollinearity issues (all VIF < 5)\n")
+}
+temp_vars_diarrhoea <- c("avgmeantemp_std_lag4", "avgmaxtemp_std_lag4", 
+                         "avgmintemp_std_lag4", "temp_range_std_lag4")
+temp_results_diarrhoea <- tibble()
+for (temp_var in temp_vars_diarrhoea) {
+  formula_temp <- as.formula(paste0(
+    "diarrhoea ~ ", temp_var, " + avgpreci_std_lag4 + ndvi8_std_lag4 + ",
+    "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
+  ))
+  model_temp <- glmer.nb(
+    formula_temp,
+    data = data %>% filter(!is.na(diarrhoea)),
+    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+  )
+  temp_coef <- summary(model_temp)$coefficients[temp_var, ]
+  temp_results_diarrhoea <- bind_rows(temp_results_diarrhoea, tibble(
+    Variable = temp_var,
+    Coefficient = temp_coef["Estimate"],
+    SE = temp_coef["Std. Error"],
+    Z_value = temp_coef["z value"],
+    P_value = temp_coef["Pr(>|z|)"],
+    AIC = AIC(model_temp),
+    VIF_mean = mean(car::vif(model_temp))
+  ))
+}
+print(temp_results_diarrhoea %>% 
+        arrange(AIC) %>%
+        mutate(across(where(is.numeric), ~round(., 3))))
+
+best_temp_diarrhoea <- temp_results_diarrhoea %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
+
+preci_vars_diarrhoea <- c("avgpreci_std_lag4", "totalpreci_std_lag4", 
+                          "maxpreci_std_lag4", "minpreci_std_lag4")
+
+preci_results_diarrhoea <- tibble()
+for (preci_var in preci_vars_diarrhoea) {
+  formula_preci <- as.formula(paste0(
+    "diarrhoea ~ ", best_temp_diarrhoea, " + ", preci_var, " + ndvi8_std_lag4 + ",
+    "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
+  ))
+  model_preci <- glmer.nb(
+    formula_preci,
+    data = data %>% filter(!is.na(diarrhoea)),
+    control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+  )
+  preci_coef <- summary(model_preci)$coefficients[preci_var, ]
+  preci_results_diarrhoea <- bind_rows(preci_results_diarrhoea, tibble(
+    Variable = preci_var,
+    Coefficient = preci_coef["Estimate"],
+    SE = preci_coef["Std. Error"],
+    Z_value = preci_coef["z value"],
+    P_value = preci_coef["Pr(>|z|)"],
+    AIC = AIC(model_preci),
+    VIF_mean = mean(car::vif(model_preci))
+  ))
+}
+print(preci_results_diarrhoea %>% 
+        arrange(AIC) %>%
+        mutate(across(where(is.numeric), ~round(., 3))))
+
+best_preci_diarrhoea <- preci_results_diarrhoea %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
+diarrhoea_final <- glmer.nb(
+  as.formula(paste0(
+    "diarrhoea ~ ", best_temp_diarrhoea, " + ", best_preci_diarrhoea, " + ndvi8_std_lag4 + ",
+    "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
+  )),
+  data = data %>% filter(!is.na(diarrhoea)),
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+)
+
+diarrhoea_final_vif <- car::vif(diarrhoea_final)
+print(round(diarrhoea_final_vif, 2))
+if (all(diarrhoea_final_vif < 5)) {
+  cat("All VIF < 5. No multicollinearity issues.\n")
+} else {
+  cat("Warning: Some VIF values > 5!\n")
+}
+print(
+  tidy(diarrhoea_final, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
+    dplyr::filter(term != "(Intercept)") %>%
+    dplyr::select(term, estimate, conf.low, conf.high, p.value) %>%
+    dplyr::mutate(dplyr::across(where(is.numeric), ~round(., 3)))
+)
