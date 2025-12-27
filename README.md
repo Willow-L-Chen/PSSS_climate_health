@@ -9,5 +9,5 @@ The repository is provided to enhance the **reproducibility and transparency** o
 All scripts are structured for clarity and may be adapted to similar epidemiological analyses.
 
 **Note:** The syndromic surveillance data analysed in this study are not publicly available due to confidentiality agreements with the Pacific Syndromic Surveillance System (PSSS).  
-To ensure reproducibility, the repository will include synthetic example datasets that replicate the structure of the original data.
+Further inquiry please contact: liuyi.chen@uq.edu.au
 
