@@ -198,7 +198,7 @@ temp_results <- tibble()
 
 for (temp_var in temp_vars) {
   formula_temp <- as.formula(paste0(
-    "afr ~ ", temp_var, " + avgpreci_std_lag4 + ndvi8_std_lag4 + ",
+    "afr ~ ", temp_var, " + ndvi8_std_lag4 + ",
     "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
   ))
   
@@ -224,7 +224,7 @@ print(temp_results %>%
         mutate(across(where(is.numeric), ~round(., 3))))
 
 best_temp <- temp_results %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
-
+best_temp
 # Precipitation
 preci_results <- tibble()
 for (preci_var in preci_vars) {
@@ -253,7 +253,7 @@ print(preci_results %>%
         mutate(across(where(is.numeric), ~round(., 3))))
 
 best_preci <- preci_results %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
-
+best_preci
 # Final Model
 afr_final <- glmer.nb(
   as.formula(paste0(
@@ -300,11 +300,11 @@ dli_vif <- car::vif(dli_base)
 high_vif_dli <- dli_vif[dli_vif > 5]
 
 if (length(high_vif_dli) > 0) {
-  cat("\n⚠ Variables with VIF > 5:\n")
+  cat("\n Variables with VIF > 5:\n")
   print(round(high_vif_dli, 2))
   cat("\nProceeding with variable selection...\n")
 } else {
-  cat("\n✓ No multicollinearity issues (all VIF < 5)\n")
+  cat("\n No multicollinearity issues (all VIF < 5)\n")
 }
 
 temp_vars_dli <- c("avgmeantemp_std_lag3", "avgmaxtemp_std_lag3", 
@@ -314,7 +314,7 @@ temp_results_dli <- tibble()
 
 for (temp_var in temp_vars_dli) {
   formula_temp <- as.formula(paste0(
-    "dli ~ ", temp_var, " + avgpreci_std_lag1 + ndvi8_std_lag4 + ",
+    "dli ~ ", temp_var, " + ndvi8_std_lag4 + ",
     "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
   ))
   
@@ -341,6 +341,7 @@ print(temp_results_dli %>%
         arrange(AIC) %>%
         mutate(across(where(is.numeric), ~round(., 3))))
 best_temp_dli <- temp_results_dli %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
+best_temp_dli
 
 preci_vars_dli <- c("avgpreci_std_lag1", "totalpreci_std_lag2", 
                     "maxpreci_std_lag3", "minpreci_std_lag4")
@@ -380,6 +381,7 @@ print(preci_results_dli %>%
         mutate(across(where(is.numeric), ~round(., 3))))
 
 best_preci_dli <- preci_results_dli %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
+best_preci_dli
 
 dli_final <- glmer.nb(
   as.formula(paste0(
@@ -393,9 +395,9 @@ dli_final <- glmer.nb(
 dli_final_vif <- car::vif(dli_final)
 print(round(dli_final_vif, 2))
 if (all(dli_final_vif < 5)) {
-  cat("✓ All VIF < 5. No multicollinearity issues.\n")
+  cat("All VIF < 5. No multicollinearity issues.\n")
 } else {
-  cat("⚠ Warning: Some VIF values > 5!\n")
+  cat("Warning: Some VIF values > 5!\n")
 }
 print(
   tidy(dli_final, effects = "fixed", exponentiate = TRUE, conf.int = TRUE) %>%
@@ -439,7 +441,7 @@ temp_vars_diarrhoea <- c("avgmeantemp_std_lag4", "avgmaxtemp_std_lag4",
 temp_results_diarrhoea <- tibble()
 for (temp_var in temp_vars_diarrhoea) {
   formula_temp <- as.formula(paste0(
-    "diarrhoea ~ ", temp_var, " + avgpreci_std_lag4 + ndvi8_std_lag4 + ",
+    "diarrhoea ~ ", temp_var, " + ndvi8_std_lag4 + ",
     "gdp_std + urbanppl_std + (1 | country_id) + offset(log_population)"
   ))
   model_temp <- glmer.nb(
@@ -463,6 +465,7 @@ print(temp_results_diarrhoea %>%
         mutate(across(where(is.numeric), ~round(., 3))))
 
 best_temp_diarrhoea <- temp_results_diarrhoea %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
+best_temp_diarrhoea
 
 preci_vars_diarrhoea <- c("avgpreci_std_lag4", "totalpreci_std_lag4", 
                           "maxpreci_std_lag4", "minpreci_std_lag4")
@@ -494,6 +497,8 @@ print(preci_results_diarrhoea %>%
         mutate(across(where(is.numeric), ~round(., 3))))
 
 best_preci_diarrhoea <- preci_results_diarrhoea %>% arrange(AIC) %>% slice(1) %>% pull(Variable)
+best_preci_diarrhoea
+
 diarrhoea_final <- glmer.nb(
   as.formula(paste0(
     "diarrhoea ~ ", best_temp_diarrhoea, " + ", best_preci_diarrhoea, " + ndvi8_std_lag4 + ",
