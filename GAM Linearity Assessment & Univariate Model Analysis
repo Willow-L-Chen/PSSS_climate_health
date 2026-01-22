@@ -1,0 +1,365 @@
+# GAM Linearity Assessment & Univariate Model Analysis
+
+library(tidyverse)
+library(mgcv)
+library(lme4)
+library(broom.mixed)
+library(gridExtra)
+library(ggplot2)
+
+# Fix function conflicts (MASS::select masks dplyr::select)
+select <- dplyr::select
+filter <- dplyr::filter
+
+#' @param outcome Outcome variable name
+#' @param predictor Predictor variable name  
+#' @param data Dataset
+#' @param offset_var Offset variable (log scale)
+#' @return Tibble with linearity test results
+test_linearity_gam <- function(outcome, predictor, data, offset_var = "log_population") {
+  data_clean <- data %>% 
+    filter(!is.na(!!sym(outcome)), !is.na(!!sym(predictor)))
+  if (nrow(data_clean) < 100) {
+    return(tibble(
+      outcome = outcome,
+      predictor = predictor,
+      linear_AIC = NA,
+      smooth_AIC = NA,
+      edf = NA,
+      p_smooth = NA,
+      linear_preferred = NA,
+      note = "Insufficient data"
+    ))
+  }
+  tryCatch({
+    formula_linear <- as.formula(paste0(
+      outcome, " ~ ", predictor, " + offset(", offset_var, ")"
+    ))
+    formula_smooth <- as.formula(paste0(
+      outcome, " ~ s(", predictor, ", k = 5) + offset(", offset_var, ")"
+    ))
+    model_linear <- gam(formula_linear, data = data_clean, 
+                        family = nb(), method = "REML")
+    model_smooth <- gam(formula_smooth, data = data_clean, 
+                        family = nb(), method = "REML")
+    smooth_summary <- summary(model_smooth)
+    edf <- smooth_summary$s.table[1, "edf"]
+    p_smooth <- smooth_summary$s.table[1, "p-value"]
+    aic_linear <- AIC(model_linear)
+    aic_smooth <- AIC(model_smooth)
+    linear_preferred <- (aic_linear - aic_smooth < 2) | (edf < 1.5)
+    tibble(
+      outcome = outcome,
+      predictor = predictor,
+      linear_AIC = round(aic_linear, 2),
+      smooth_AIC = round(aic_smooth, 2),
+      delta_AIC = round(aic_linear - aic_smooth, 2),
+      edf = round(edf, 2),
+      p_smooth = round(p_smooth, 4),
+      linear_preferred = linear_preferred,
+      interpretation = case_when(
+        edf < 1.5 ~ "Linear relationship",
+        edf >= 1.5 & edf < 2.5 ~ "Slightly non-linear",
+        edf >= 2.5 ~ "Non-linear relationship"
+      )
+    )
+  }, error = function(e) {
+    tibble(
+      outcome = outcome,
+      predictor = predictor,
+      linear_AIC = NA,
+      smooth_AIC = NA,
+      delta_AIC = NA,
+      edf = NA,
+      p_smooth = NA,
+      linear_preferred = NA,
+      interpretation = paste("Error:", e$message)
+    )
+  })
+}
+
+#' @param outcome Outcome variable name
+#' @param predictor Predictor variable name
+#' @param data Dataset
+#' @param offset_var Offset variable
+#' @return ggplot object
+plot_gam_smooth <- function(outcome, predictor, data, offset_var = "log_population") {
+  data_clean <- data %>% 
+    filter(!is.na(!!sym(outcome)), !is.na(!!sym(predictor)))
+  tryCatch({
+    formula_smooth <- as.formula(paste0(
+      outcome, " ~ s(", predictor, ", k = 5) + offset(", offset_var, ")"
+    ))
+    model <- gam(formula_smooth, data = data_clean, 
+                 family = nb(), method = "REML")
+    pred_data <- data.frame(
+      x = seq(min(data_clean[[predictor]], na.rm = TRUE),
+              max(data_clean[[predictor]], na.rm = TRUE),
+              length.out = 100)
+    )
+    names(pred_data) <- predictor
+    pred_data[[offset_var]] <- mean(data_clean[[offset_var]], na.rm = TRUE)
+    pred <- predict(model, newdata = pred_data, type = "terms", se.fit = TRUE)
+    pred_data$fit <- pred$fit[, 1]
+    pred_data$se <- pred$se.fit[, 1]
+    pred_data$lower <- pred_data$fit - 1.96 * pred_data$se
+    pred_data$upper <- pred_data$fit + 1.96 * pred_data$se
+    edf <- round(summary(model)$s.table[1, "edf"], 2)
+    pred_label <- gsub("_std_lag", " (lag ", predictor)
+    pred_label <- gsub("_std", "", pred_label)
+    pred_label <- gsub("_", " ", pred_label)
+    if (grepl("lag", pred_label)) pred_label <- paste0(pred_label, ")")
+    ggplot(pred_data, aes(x = .data[[predictor]])) +
+      geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, fill = "steelblue") +
+      geom_line(aes(y = fit), color = "steelblue", linewidth = 1) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+      labs(
+        title = paste0(toupper(outcome), " ~ ", pred_label),
+        subtitle = paste0("EDF = ", edf, 
+                          ifelse(edf < 1.5, " (Linear)", 
+                                 ifelse(edf < 2.5, " (Slight non-linearity)", 
+                                        " (Non-linear)"))),
+        x = paste0(pred_label, " (standardised)"),
+        y = "Partial effect (log scale)"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 10, face = "bold"),
+        plot.subtitle = element_text(size = 8, color = "gray40")
+      )
+  }, error = function(e) {
+    ggplot() + 
+      annotate("text", x = 0.5, y = 0.5, 
+               label = paste("Error:", e$message)) +
+      theme_void()
+  })
+}
+
+#univariate
+#' @param outcome Outcome variable name
+#' @param predictor Predictor variable name
+#' @param data Dataset
+#' @param group_var Random effect grouping variable
+#' @param offset_var Offset variable
+#' @return Tibble with model results
+fit_univariate_model <- function(outcome, predictor, data, 
+                                 group_var = "country_id",
+                                 offset_var = "log_population") {
+  
+  data_clean <- data %>% 
+    filter(!is.na(!!sym(outcome)), !is.na(!!sym(predictor)))
+  if (nrow(data_clean) < 100) {
+    return(tibble(
+      outcome = outcome,
+      predictor = predictor,
+      estimate = NA, conf.low = NA, conf.high = NA,
+      IRR = NA, IRR_lower = NA, IRR_upper = NA,
+      p.value = NA, AIC = NA, n_obs = nrow(data_clean),
+      note = "Insufficient data"
+    ))
+  }
+  tryCatch({
+    formula_str <- paste0(
+      outcome, " ~ ", predictor, 
+      " + (1 | ", group_var, ") + offset(", offset_var, ")"
+    )
+    model <- glmer.nb(
+      as.formula(formula_str),
+      data = data_clean,
+      control = glmerControl(optimizer = "bobyqa", 
+                             optCtrl = list(maxfun = 100000))
+    )
+    coef_table <- summary(model)$coefficients
+    est <- coef_table[predictor, "Estimate"]
+    se <- coef_table[predictor, "Std. Error"]
+    z <- coef_table[predictor, "z value"]
+    p <- coef_table[predictor, "Pr(>|z|)"]
+    ci_low <- est - 1.96 * se
+    ci_high <- est + 1.96 * se
+    irr <- exp(est)
+    irr_low <- exp(ci_low)
+    irr_high <- exp(ci_high)
+    tibble(
+      outcome = outcome,
+      predictor = predictor,
+      estimate = round(est, 4),
+      se = round(se, 4),
+      conf.low = round(ci_low, 4),
+      conf.high = round(ci_high, 4),
+      IRR = round(irr, 3),
+      IRR_lower = round(irr_low, 3),
+      IRR_upper = round(irr_high, 3),
+      p.value = round(p, 4),
+      significance = case_when(
+        p < 0.001 ~ "***",
+        p < 0.01 ~ "**",
+        p < 0.05 ~ "*",
+        TRUE ~ ""
+      ),
+      AIC = round(AIC(model), 2),
+      n_obs = nrow(data_clean)
+    )
+    
+  }, error = function(e) {
+    tibble(
+      outcome = outcome,
+      predictor = predictor,
+      estimate = NA, se = NA, conf.low = NA, conf.high = NA,
+      IRR = NA, IRR_lower = NA, IRR_upper = NA,
+      p.value = NA, significance = NA, AIC = NA, 
+      n_obs = nrow(data_clean),
+      note = paste("Error:", e$message)
+    )
+  })
+}
+ 
+#' @param outcome Outcome variable name
+#' @param predictors Vector of predictor names
+#' @param data Dataset
+#' @param save_plots Whether to save plots
+#' @param plot_dir Directory for saving plots
+#' @return List with linearity results, univariate results, and plots
+run_full_analysis <- function(outcome, predictors, data,
+                              save_plots = TRUE,
+                              plot_dir = "gam_plots") {
+  linearity_results <- map_df(predictors, ~{
+    test_linearity_gam(outcome, .x, data)
+  })
+  univariate_results <- map_df(predictors, ~{
+    fit_univariate_model(outcome, .x, data)
+  })
+  
+  plots <- map(predictors, ~{
+    plot_gam_smooth(outcome, .x, data)
+  })
+  names(plots) <- predictors
+
+  if (save_plots) {
+    if (!dir.exists(plot_dir)) dir.create(plot_dir, recursive = TRUE)
+    for (i in seq_along(predictors)) {
+      filename <- file.path(plot_dir, 
+                            paste0(outcome, "_", predictors[i], "_gam.png"))
+      ggsave(filename, plots[[i]], width = 6, height = 4, dpi = 150)
+    }
+    n_plots <- length(plots)
+    ncol <- min(3, n_plots)
+    nrow <- ceiling(n_plots / ncol)
+    combined_plot <- gridExtra::arrangeGrob(grobs = plots, ncol = ncol)
+    combined_filename <- file.path(plot_dir, 
+                                   paste0(outcome, "_all_gam_plots.png"))
+    ggsave(combined_filename, combined_plot, 
+           width = 5 * ncol, height = 4 * nrow, dpi = 150)
+  }
+  
+  list(
+    outcome = outcome,
+    linearity = linearity_results,
+    univariate = univariate_results,
+    plots = plots
+  )
+}
+climate_base_vars <- c(
+  "avgmeantemp_std", "avgmaxtemp_std", "avgmintemp_std", "temp_range_std",
+  "avgpreci_std", "totalpreci_std", "maxpreci_std", "minpreci_std", 
+  "ndvi8_std"
+)
+
+all_lagged_predictors <- expand.grid(
+  base = climate_base_vars,
+  lag = 1:4,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(predictor = paste0(base, "_lag", lag)) %>%
+  pull(predictor)
+
+ses_predictors <- c("gdp_std", "urbanppl_std")
+
+all_predictors <- c(all_lagged_predictors, ses_predictors)
+
+# Linearity test for all predictors
+afr_linearity <- map_df(all_predictors, ~{
+  test_linearity_gam("afr", .x, data)
+})
+
+# Univariate models for all predictors
+afr_univariate <- map_df(all_predictors, ~{
+  fit_univariate_model("afr", .x, data)
+})
+
+afr_plot_vars <- c(paste0(climate_base_vars, "_lag4"), ses_predictors)
+afr_plots <- map(afr_plot_vars, ~plot_gam_smooth("afr", .x, data))
+names(afr_plots) <- afr_plot_vars
+
+if (!dir.exists("gam_plots/afr")) dir.create("gam_plots/afr", recursive = TRUE)
+for (var in afr_plot_vars) {
+  ggsave(paste0("gam_plots/afr/afr_", var, ".png"), 
+         afr_plots[[var]], width = 6, height = 4, dpi = 150)
+}
+
+afr_combined <- gridExtra::arrangeGrob(grobs = afr_plots, ncol = 3)
+ggsave("gam_plots/afr/afr_all_gam_combined.png", afr_combined, 
+       width = 15, height = 12, dpi = 150)
+# dli
+# Linearity test for all predictors
+dli_linearity <- map_df(all_predictors, ~{
+  test_linearity_gam("dli", .x, data_dli)
+})
+
+# Univariate
+dli_univariate <- map_df(all_predictors, ~{
+  fit_univariate_model("dli", .x, data_dli)
+})
+
+dli_plot_vars <- c(paste0(climate_base_vars, "_lag4"), ses_predictors)
+dli_plots <- map(dli_plot_vars, ~plot_gam_smooth("dli", .x, data_dli))
+names(dli_plots) <- dli_plot_vars
+
+if (!dir.exists("gam_plots/dli")) dir.create("gam_plots/dli", recursive = TRUE)
+for (var in dli_plot_vars) {
+  ggsave(paste0("gam_plots/dli/dli_", var, ".png"), 
+         dli_plots[[var]], width = 6, height = 4, dpi = 150)
+}
+
+dli_combined <- gridExtra::arrangeGrob(grobs = dli_plots, ncol = 3)
+ggsave("gam_plots/dli/dli_all_gam_combined.png", dli_combined, 
+       width = 15, height = 12, dpi = 150)
+
+# diarrhoea
+diarrhoea_linearity <- map_df(all_predictors, ~{
+  test_linearity_gam("diarrhoea", .x, data)
+})
+
+diarrhoea_univariate <- map_df(all_predictors, ~{
+  fit_univariate_model("diarrhoea", .x, data)
+})
+
+diarrhoea_plot_vars <- c(paste0(climate_base_vars, "_lag4"), ses_predictors)
+diarrhoea_plots <- map(diarrhoea_plot_vars, ~plot_gam_smooth("diarrhoea", .x, data))
+names(diarrhoea_plots) <- diarrhoea_plot_vars
+
+if (!dir.exists("gam_plots/diarrhoea")) dir.create("gam_plots/diarrhoea", recursive = TRUE)
+for (var in diarrhoea_plot_vars) {
+  ggsave(paste0("gam_plots/diarrhoea/diarrhoea_", var, ".png"), 
+         diarrhoea_plots[[var]], width = 6, height = 4, dpi = 150)
+}
+
+diarrhoea_combined <- gridExtra::arrangeGrob(grobs = diarrhoea_plots, ncol = 3)
+ggsave("gam_plots/diarrhoea/diarrhoea_all_gam_combined.png", diarrhoea_combined, 
+       width = 15, height = 12, dpi = 150)
+
+# all linearity results
+all_linearity <- bind_rows(
+  afr_linearity %>% mutate(outcome = "AFR"),
+  dli_linearity %>% mutate(outcome = "DLI"),
+  diarrhoea_linearity %>% mutate(outcome = "Diarrhoea")
+)
+
+# all univariate results
+all_univariate <- bind_rows(
+  afr_univariate,
+  dli_univariate,
+  diarrhoea_univariate
+)
+
+write_csv(all_linearity, "gam_linearity_results.csv")
+write_csv(all_univariate, "univariate_model_results.csv")
